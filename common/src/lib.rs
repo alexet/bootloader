@@ -6,7 +6,7 @@ use crate::legacy_memory_region::{LegacyFrameAllocator, LegacyMemoryRegion};
 use bootloader_api::{
     BootInfo, BootloaderConfig,
     config::Mapping,
-    info::{FrameBuffer, FrameBufferInfo, MemoryRegion, TlsTemplate},
+    info::{FrameBuffer, FrameBufferInfo, MemoryRegion, PciDeviceLocation, TlsTemplate},
 };
 use bootloader_boot_config::{BootConfig, LevelFilter};
 use core::{alloc::Layout, arch::asm, mem::MaybeUninit, slice};
@@ -60,6 +60,17 @@ pub fn init_logger(
     log::info!("Framebuffer info: {:?}", info);
 }
 
+/// Initialize a serial-only logger, for boots with no usable linear
+/// framebuffer to draw text into (e.g. a Blt-only GOP mode — see
+/// `bootloader-x86_64-uefi`'s handling of `PixelFormat::BltOnly`).
+pub fn init_logger_no_framebuffer(log_level: LevelFilter, serial_logger_status: bool) {
+    let logger = logger::LOGGER
+        .get_or_init(move || logger::LockedLogger::new_serial_only(serial_logger_status));
+    log::set_logger(logger).expect("logger already set");
+    log::set_max_level(convert_level(log_level));
+    log::info!("No usable linear framebuffer at boot; logging to serial only");
+}
+
 fn convert_level(level: LevelFilter) -> log::LevelFilter {
     match level {
         LevelFilter::Off => log::LevelFilter::Off,
@@ -80,6 +91,11 @@ pub struct SystemInfo {
     pub rsdp_addr: Option<PhysAddr>,
     pub ramdisk_addr: Option<u64>,
     pub ramdisk_len: u64,
+    /// The PCI device backing the boot display output, if identified. Set
+    /// independently of `framebuffer` — still available when the GOP mode is
+    /// Blt-only and there's no linear buffer to map. See
+    /// [`BootInfo::display_pci_device`](bootloader_api::info::BootInfo::display_pci_device).
+    pub display_pci_device: Option<PciDeviceLocation>,
 }
 
 /// The physical address of the framebuffer and information about the framebuffer.
@@ -583,6 +599,7 @@ where
         info.kernel_image_offset = mappings.kernel_image_offset.as_u64();
         info.kernel_stack_bottom = mappings.stack_bottom.as_u64();
         info.kernel_stack_len = config.kernel_stack_size;
+        info.display_pci_device = system_info.display_pci_device.into();
         info._test_sentinel = boot_config._test_sentinel;
         info
     })

@@ -3,7 +3,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::memory_descriptor::UefiMemoryDescriptor;
-use bootloader_api::info::FrameBufferInfo;
+use bootloader_api::info::{FrameBufferInfo, PciDeviceLocation};
 use bootloader_boot_config::BootConfig;
 use bootloader_x86_64_common::{
     Kernel, RawFrameBufferInfo, SystemInfo, legacy_memory_region::LegacyFrameAllocator,
@@ -32,6 +32,7 @@ use x86_64::{
 };
 
 mod memory_descriptor;
+mod pci_display;
 
 struct BootFile {
     disk: &'static CStr16,
@@ -87,12 +88,21 @@ fn main() -> Status {
         config.frame_buffer.minimum_framebuffer_width =
             kernel.config.frame_buffer.minimum_framebuffer_width;
     }
-    let framebuffer = init_logger(&config);
+    let (framebuffer, display_pci_device) = init_display(&config);
 
     log::info!("UEFI bootloader started");
 
     if let Some(framebuffer) = framebuffer {
         log::info!("Using framebuffer at {:#x}", framebuffer.addr);
+    }
+    if let Some(loc) = display_pci_device {
+        log::info!(
+            "Boot display is PCI {:04x}:{:02x}:{:02x}.{:x}",
+            loc.segment,
+            loc.bus,
+            loc.device,
+            loc.function
+        );
     }
 
     if let Some(err) = error_loading_config {
@@ -149,6 +159,7 @@ fn main() -> Status {
         },
         ramdisk_addr,
         ramdisk_len,
+        display_pci_device,
     };
 
     bootloader_x86_64_common::load_and_switch_to_kernel(
@@ -345,9 +356,24 @@ fn create_page_tables(
     }
 }
 
-fn init_logger(config: &BootConfig) -> Option<RawFrameBufferInfo> {
-    let gop_handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
-    let mut gop = boot::open_protocol_exclusive::<GraphicsOutput>(gop_handle).ok()?;
+/// Sets up display output and, if a linear framebuffer is available, the
+/// framebuffer-backed logger. Returns the linear framebuffer (if any) and the
+/// PCI device backing display output (if the bootloader could identify one),
+/// independently of each other: the PCI device is still reported when the
+/// GOP mode is Blt-only and there's no linear buffer to map, so the kernel
+/// can hand that same device off to a real GPU driver instead.
+fn init_display(config: &BootConfig) -> (Option<RawFrameBufferInfo>, Option<PciDeviceLocation>) {
+    let Ok(gop_handle) = boot::get_handle_for_protocol::<GraphicsOutput>() else {
+        return (None, None);
+    };
+    // Resolve the owning PCI device before exclusively opening GOP: it only
+    // needs the (shareable) DevicePath protocol, and doing it first means we
+    // still get an answer even if opening GraphicsOutput below fails.
+    let display_pci_device = pci_display::resolve(gop_handle);
+
+    let Ok(mut gop) = boot::open_protocol_exclusive::<GraphicsOutput>(gop_handle) else {
+        return (None, display_pci_device);
+    };
 
     let mode = {
         let modes = gop.modes();
@@ -378,6 +404,20 @@ fn init_logger(config: &BootConfig) -> Option<RawFrameBufferInfo> {
     }
 
     let mode_info = gop.current_mode_info();
+
+    if mode_info.pixel_format() == PixelFormat::BltOnly {
+        // No linear framebuffer to map — the firmware only offers Blt()
+        // block-transfer calls, which nothing outside this bootloader stage
+        // can issue. Report no framebuffer rather than mapping garbage; a
+        // real driver (e.g. virtio-gpu) can still take over `display_pci_device`
+        // to draw anything. Serial remains available for logging.
+        bootloader_x86_64_common::init_logger_no_framebuffer(
+            config.log_level,
+            config.serial_logging,
+        );
+        return (None, display_pci_device);
+    }
+
     let mut framebuffer = gop.frame_buffer();
     let slice = unsafe { slice::from_raw_parts_mut(framebuffer.as_mut_ptr(), framebuffer.size()) };
     let info = FrameBufferInfo {
@@ -387,9 +427,8 @@ fn init_logger(config: &BootConfig) -> Option<RawFrameBufferInfo> {
         pixel_format: match mode_info.pixel_format() {
             PixelFormat::Rgb => bootloader_api::info::PixelFormat::Rgb,
             PixelFormat::Bgr => bootloader_api::info::PixelFormat::Bgr,
-            PixelFormat::Bitmask | PixelFormat::BltOnly => {
-                panic!("Bitmask and BltOnly framebuffers are not supported")
-            }
+            PixelFormat::Bitmask => panic!("Bitmask framebuffers are not supported"),
+            PixelFormat::BltOnly => unreachable!("handled above"),
         },
         bytes_per_pixel: 4,
         stride: mode_info.stride(),
@@ -403,10 +442,13 @@ fn init_logger(config: &BootConfig) -> Option<RawFrameBufferInfo> {
         config.serial_logging,
     );
 
-    Some(RawFrameBufferInfo {
-        addr: PhysAddr::new(framebuffer.as_mut_ptr() as u64),
-        info,
-    })
+    (
+        Some(RawFrameBufferInfo {
+            addr: PhysAddr::new(framebuffer.as_mut_ptr() as u64),
+            info,
+        }),
+        display_pci_device,
+    )
 }
 
 #[cfg(target_os = "uefi")]

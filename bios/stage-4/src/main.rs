@@ -166,6 +166,9 @@ pub extern "C" fn _start(info: &mut BiosInfo) -> ! {
             _ => Some(info.ramdisk.start),
         },
         ramdisk_len: info.ramdisk.len,
+        // BIOS boot has no device-path/PCI protocols to walk, so the PCI
+        // device behind the VBE framebuffer can't be identified here.
+        display_pci_device: None,
     };
 
     load_and_switch_to_kernel(kernel, config, frame_allocator, page_tables, system_info);

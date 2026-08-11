@@ -37,6 +37,20 @@ impl LockedLogger {
         }
     }
 
+    /// Create a new instance with no framebuffer backing (e.g. no usable
+    /// linear framebuffer at boot), logging to serial only.
+    pub fn new_serial_only(serial_logger_status: bool) -> Self {
+        let serial = match serial_logger_status {
+            true => Some(Spinlock::new(unsafe { SerialPort::init() })),
+            false => None,
+        };
+
+        LockedLogger {
+            framebuffer: None,
+            serial,
+        }
+    }
+
     /// Force-unlocks the logger to prevent a deadlock.
     ///
     /// ## Safety

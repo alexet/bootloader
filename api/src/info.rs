@@ -66,6 +66,17 @@ pub struct BootInfo {
     pub kernel_stack_bottom: u64,
     /// Size of the kernel stack
     pub kernel_stack_len: u64,
+    /// The PCI(e) function backing the boot display output (the device whose
+    /// BAR the UEFI GOP framebuffer, if any, lives in), if the bootloader
+    /// could identify one.
+    ///
+    /// Set independently of `framebuffer`: it stays populated even when the
+    /// firmware's GOP mode is Blt-only and there is no linear buffer to map,
+    /// so the kernel can hand this same PCI device off to a real GPU driver
+    /// (e.g. virtio-gpu) instead of drawing directly. `Optional::None` on
+    /// BIOS boot (no device-path/PCI protocols available there) or if the
+    /// bootloader couldn't resolve the owning PCI function.
+    pub display_pci_device: Optional<PciDeviceLocation>,
 
     #[doc(hidden)]
     pub _test_sentinel: u64,
@@ -91,6 +102,7 @@ impl BootInfo {
             kernel_image_offset: 0,
             kernel_stack_bottom: 0,
             kernel_stack_len: 0,
+            display_pci_device: Optional::None,
             _test_sentinel: 0,
         }
     }
@@ -289,6 +301,22 @@ pub enum PixelFormat {
         /// Bit offset of the blue value.
         blue_position: u8,
     },
+}
+
+/// Identifies a PCI(e) function by its location in the bus hierarchy, as read
+/// from firmware (UEFI device paths / PCI config space). See
+/// [`BootInfo::display_pci_device`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct PciDeviceLocation {
+    /// PCI segment (domain) group number. Almost always `0`.
+    pub segment: u16,
+    /// Bus number.
+    pub bus: u8,
+    /// Device number on `bus`.
+    pub device: u8,
+    /// Function number on `device`.
+    pub function: u8,
 }
 
 /// Information about the thread local storage (TLS) template.
