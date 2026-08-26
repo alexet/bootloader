@@ -27,7 +27,7 @@ impl LockedLogger {
         };
 
         let serial = match serial_logger_status {
-            true => Some(Spinlock::new(unsafe { SerialPort::init() })),
+            true => unsafe { SerialPort::init() }.map(Spinlock::new),
             false => None,
         };
 
@@ -41,7 +41,7 @@ impl LockedLogger {
     /// linear framebuffer at boot), logging to serial only.
     pub fn new_serial_only(serial_logger_status: bool) -> Self {
         let serial = match serial_logger_status {
-            true => Some(Spinlock::new(unsafe { SerialPort::init() })),
+            true => unsafe { SerialPort::init() }.map(Spinlock::new),
             false => None,
         };
 
