@@ -26,7 +26,20 @@ pub fn create_fat_filesystem(
         .truncate(true)
         .open(out_fat_path)
         .unwrap();
-    let fat_size_padded_and_rounded = ((needed_size + 1024 * 64 - 1) / MB + 1) * MB + MB;
+    // Round up to a megabyte, then add slack for what the *filesystem*
+    // costs on top of the file bytes: every file's last cluster is rounded
+    // up, each needs directory entries (VFAT long names take several), and
+    // the FAT tables themselves scale with the volume.
+    //
+    // The slack used to be a flat 1 MiB, which silently stopped being
+    // enough as this image grew — a ~500 MiB image with a dozen-odd
+    // 29 MiB Mesa demos in it failed with "No space left on device" while
+    // *writing* the partition, which reads as a host-disk problem and is
+    // not one. Proportional plus a floor: 2% covers cluster rounding at
+    // any plausible cluster size, and 4 MiB keeps small images (the test
+    // runner's, a few MiB) comfortable.
+    let overhead = core::cmp::max(needed_size / 50, 4 * MB);
+    let fat_size_padded_and_rounded = ((needed_size + 1024 * 64 - 1) / MB + 1) * MB + overhead;
     fat_file.set_len(fat_size_padded_and_rounded).unwrap();
 
     // choose a file system label
